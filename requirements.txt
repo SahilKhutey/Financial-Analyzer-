@@ -1,0 +1,12 @@
+pandas
+numpy
+yfinance
+streamlit
+plotly
+pillow
+scikit-learn
+xgboost
+mss
+opencv-python
+scipy
+pykalman
