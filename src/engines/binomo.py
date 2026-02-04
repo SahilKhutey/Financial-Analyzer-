@@ -10,12 +10,13 @@ import pandas as pd
 import numpy as np
 from dataclasses import dataclass
 from typing import Optional, List, Dict
+from src.core.types import FinalSignal, TradeAction, VisionOutput
 
 @dataclass
 class BinomoSignal:
     action: str  # "BUY", "SELL", "STAY_OUT"
     confidence: float # 0.0 to 1.0
-    expiry: str # "2-3 min"
+    expiry: str # "1 min", "2-3 min", "5 min"
     reasoning: List[str]
     is_safe: bool
 
@@ -42,10 +43,8 @@ class BinomoEngine:
             return False, f"Risk: RSI Extreme ({rsi:.1f})"
             
         # Volatility Check (Normalized Range)
-        # Using High-Low / Open as proxy if 'volatility' not pre-calc
         vol = row.get('volatility', 0)
         if vol == 0:
-             # Fallback calc
              vol = (row['High'] - row['Low']) / row['Open']
         
         if vol < self.min_volatility:
@@ -53,48 +52,23 @@ class BinomoEngine:
             
         return True, "Safe"
 
-    def generate_signal(self, row: pd.Series) -> dict:
+    def determine_expiry(self, volatility: float) -> str:
         """
-        Step 2: Signal Engine (Simulated Probabilistic Classifier)
-        Returns dict with signal and confidence.
+        Dynamic Expiry based on Market Velocity.
+        High Vol -> Fast Expiry (1 min).
+        Low Vol -> Slow Expiry (5 min).
         """
-        score = 0.5 # Neutral
-        
-        # 1. Trend (EMA-like Logic)
-        # Assuming we have some trend info or calculating generic momentum
-        close = row['Close']
-        open_p = row['Open']
-        
-        # Simple Momentum
-        if close > open_p: score += 0.1
-        else: score -= 0.1
-        
-        # RSI Influence (Mean Reversion pressure vs Momentum)
-        rsi = row.get('rsi', 50)
-        if rsi > 50: score += 0.05
-        else: score -= 0.05
-        
-        # Aggressive Momentum Boost
-        if abs(close - open_p) / open_p > 0.001:
-            if close > open_p: score += 0.15
-            else: score -= 0.15
-            
-        # Normalize to 0-1
-        prob_buy = min(0.99, max(0.01, score))
-        prob_sell = 1.0 - prob_buy
-        
-        threshold = 0.60
-        
-        if prob_buy > threshold:
-            return {"signal": "BUY", "confidence": prob_buy}
-        elif prob_sell > threshold:
-            return {"signal": "SELL", "confidence": prob_sell}
+        if volatility > 0.002: # High movement
+            return "1 min (Fast)"
+        elif volatility < 0.0008: # Slow crawl
+            return "5 min (Trend)"
         else:
-            return {"signal": "STAY_OUT", "confidence": max(prob_buy, prob_sell)}
+            return "2-3 min (Normal)"
 
-    def analyze(self, df: pd.DataFrame, vision_out=None) -> BinomoSignal:
+    def analyze(self, df: pd.DataFrame, vision_out: Optional[VisionOutput] = None, fusion_sig: Optional[FinalSignal] = None) -> BinomoSignal:
         """
         Main Analysis pipeline.
+        Integrates "Grand Fusion" signals for institutional accuracy.
         """
         if df is None or df.empty:
             return BinomoSignal("STAY_OUT", 0.0, "N/A", ["No Data for Logic"], False)
@@ -105,29 +79,72 @@ class BinomoEngine:
             
         latest = df.iloc[-1]
         
+        # 0. Calc Volatility for Expiry
+        vol = latest.get('volatility', (latest['High'] - latest['Low']) / latest['Open'])
+        expiry = self.determine_expiry(vol)
+        
         # 1. Risk Filter
         safe, reason = self.risk_filter(latest)
         if not safe:
             return BinomoSignal("STAY_OUT", 0.0, "N/A", [reason], False)
             
-        # 2. Generate Signal
-        raw_sig = self.generate_signal(latest)
+        # 2. DECISION LOGIC
         
-        # 3. Vision Confirmation (Optional Boost)
-        conf = raw_sig['confidence']
-        reasons = [f"Model Prob: {conf:.2f}"]
+        # A. Institutional Override (Fusion)
+        # If we have a High Confidence Fusion Signal, we use it directly.
+        if fusion_sig and fusion_sig.action != TradeAction.STAY_OUT and fusion_sig.confidence > 0.7:
+             return BinomoSignal(
+                action=fusion_sig.action.value,
+                confidence=fusion_sig.confidence,
+                expiry=expiry,
+                reasoning=["🔥 Institutional Override"] + fusion_sig.reasoning,
+                is_safe=True
+            )
+            
+        # B. Fallback: Local Heuristic (If Fusion is weak/missing)
+        score = 0.5
+        reasons = []
         
+        # Trend
+        if latest['Close'] > latest['Open']: 
+            score += 0.1
+            reasons.append("Candle Green")
+        else: 
+            score -= 0.1
+            reasons.append("Candle Red")
+            
+        # RSI
+        rsi = latest['rsi']
+        if rsi > 55: score += 0.05
+        elif rsi < 45: score -= 0.05
+        
+        # Normalize
+        prob_buy = min(0.99, max(0.01, score))
+        prob_sell = 1.0 - prob_buy
+        
+        final_action = "STAY_OUT"
+        final_conf = 0.0
+        
+        if prob_buy > 0.65:
+            final_action = "BUY"
+            final_conf = prob_buy
+        elif prob_sell > 0.65:
+            final_action = "SELL"
+            final_conf = prob_sell
+            
+        # C. Vision Boost
         if vision_out:
-            reasons.append(f"Vision Bias: {vision_out.market_bias.value}")
-            if raw_sig['signal'] == "BUY" and vision_out.market_bias.value == "BULLISH":
-                conf = min(0.99, conf + 0.1)
-            elif raw_sig['signal'] == "SELL" and vision_out.market_bias.value == "BEARISH":
-                conf = min(0.99, conf + 0.1)
+            if final_action == "BUY" and vision_out.market_bias.value == "BULLISH":
+                final_conf = min(0.99, final_conf + 0.1)
+                reasons.append(f"Vision Confirmed")
+            elif final_action == "SELL" and vision_out.market_bias.value == "BEARISH":
+                final_conf = min(0.99, final_conf + 0.1)
+                reasons.append(f"Vision Confirmed")
                 
         return BinomoSignal(
-            action=raw_sig['signal'],
-            confidence=conf,
-            expiry="2-3 min",
+            action=final_action,
+            confidence=final_conf,
+            expiry=expiry,
             reasoning=reasons,
             is_safe=True
         )

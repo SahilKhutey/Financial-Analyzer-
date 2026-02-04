@@ -177,6 +177,9 @@ class MLProductionEngine:
         """
         Run Live Prediction Pipeline.
         """
+        if df is None:
+             return FinalSignal(TradeAction.STAY_OUT, 0.0, ["ML: No Data"], "N/A", "N/A", "N/A")
+
         # Online Learning & Retraining
         # Check if we need initial training
         if not self.is_trained and len(df) > 200:

@@ -61,7 +61,9 @@ class SafetyGates:
             
         # Rule 4: ML Validation
         # If this is an ML signal, ensure we trust the probability
-        if "XGB" in str(signal.reasoning) and signal.confidence < 0.65:
+        # Fusion uses "ML:", ML Engine uses "XGB"
+        reason_str = str(signal.reasoning)
+        if ("XGB" in reason_str or "ML:" in reason_str) and signal.confidence < 0.65:
              # Basic Threshold is 0.6, but for ML we want 0.65 for entry
              return FinalSignal(TradeAction.STAY_OUT, signal.confidence, ["ML Conf < 0.65"], signal.vision_bias, signal.ts_bias, regime.state)
 

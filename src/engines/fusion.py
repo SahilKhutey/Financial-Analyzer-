@@ -39,40 +39,62 @@ class SignalFusion:
 
     def fuse(self, 
              vision: VisionOutput, 
-             ts: TSOutput, 
-             regime: RegimeOutput,
+             ts: Optional[TSOutput] = None, 
+             regime: Optional[RegimeOutput] = None,
              ml_sig: FinalSignal = None,
              deep_sig: FinalSignal = None,
              math_sig: FinalSignal = None) -> FinalSignal:
         """
         Produce the Final Grand Signal.
+        Auto-adapts weights if data-driven signals are missing (Vision-Only Mode).
         """
         # 1. Component Scores (-1 to 1)
         
-        # Legacy Scores
-        v_score = 1.0 if vision.market_bias == MarketBias.BULLISH else (-1.0 if vision.market_bias == MarketBias.BEARISH else 0.0)
-        v_score *= vision.breakout_prob # Confidence scaling
+        # Vision Score
+        v_score = 0.0
+        if vision:
+            v_score = 1.0 if vision.market_bias == MarketBias.BULLISH else (-1.0 if vision.market_bias == MarketBias.BEARISH else 0.0)
+            v_score *= vision.breakout_prob # Confidence scaling
         
-        ts_score = (ts.bullish_prob - ts.bearish_prob)
-        
+        # TS Score
+        ts_score = 0.0
+        if ts:
+            ts_score = (ts.bullish_prob - ts.bearish_prob)
+            
         # New Engine Scores
         ml_score = self._signal_to_score(ml_sig) if ml_sig else 0.0
         deep_score = self._signal_to_score(deep_sig) if deep_sig else 0.0
         math_score = self._signal_to_score(math_sig) if math_sig else 0.0
         
-        # 2. Weighted Sum
-        # Normalize weights if inputs are missing? 
-        # For now, we assume if missing, they contribute 0 (neutral), effectively lowering confidence.
+        # 2. Dynamic Weighting Logic
+        # If we lack data-driven signals (TS, ML, Deep, Math), we are in "Vision Only" mode.
         
+        current_weights = {
+            'ml': self.w_ml if ml_sig else 0.0,
+            'deep': self.w_deep if deep_sig else 0.0,
+            'math': self.w_math if math_sig else 0.0,
+            'ts': self.w_ts if ts else 0.0,
+            'vision': self.w_vision
+        }
+        
+        total_weight = sum(current_weights.values())
+        
+        if total_weight == 0:
+            return FinalSignal(TradeAction.STAY_OUT, 0.0, ["No Signals Available"], "N/A", "N/A", "N/A")
+            
+        # Normalize weights to sum to 1.0
+        norm_w = {k: v / total_weight for k, v in current_weights.items()}
+        
+        # 3. Weighted Sum
         raw_signal = (
-            (ml_score * self.w_ml) +
-            (deep_score * self.w_deep) +
-            (math_score * self.w_math) +
-            (v_score * self.w_vision) +
-            (ts_score * self.w_ts)
+            (ml_score * norm_w['ml']) +
+            (deep_score * norm_w['deep']) +
+            (math_score * norm_w['math']) +
+            (v_score * norm_w['vision']) +
+            (ts_score * norm_w['ts'])
         )
         
-        # 3. Decision Logic & Confluence Check
+        # 4. Decision Logic & Confluence Check
         action = TradeAction.STAY_OUT
         confidence = abs(raw_signal)
         
@@ -81,7 +103,6 @@ class SignalFusion:
         SELL_THRESH = -0.25
         
         # Veto Logic: If ML (Strongest) is strongly opposing the weighted sum, reduce confidence
-        # Example: ML says SELL (-0.8), but others pull avg to BUY (0.1).
         if ml_sig and ml_sig.confidence > 0.6:
             if (ml_score > 0 and raw_signal < 0) or (ml_score < 0 and raw_signal > 0):
                 # Strong disagreement -> Kill signal
@@ -93,22 +114,34 @@ class SignalFusion:
         elif raw_signal < SELL_THRESH:
             action = TradeAction.SELL
             
-        # 4. Construct Final Signal
+        # 5. Construct Final Signal
         reasons = []
-        reasons.append(f"Grand Score: {raw_signal:.2f}")
+        mode_label = "Grand Fusion"
+        
+        if norm_w['vision'] > 0.9: 
+            mode_label = "Vision Only"
+            reasons.append("⚠️ Vision Only Mode")
+            
+        reasons.append(f"Score: {raw_signal:.2f}")
         if ml_sig: reasons.append(f"ML: {ml_score:.2f}")
-        if deep_sig: reasons.append(f"Deep: {deep_score:.2f}")
+        if norm_w['vision'] > 0.5: reasons.append(f"Visual: {v_score:.2f}")
+        
+        regime_state = regime.state if regime else "Unknown"
         
         intermediate_signal = FinalSignal(
             action=action,
             confidence=round(confidence, 2),
             reasoning=reasons,
-            vision_bias=vision.market_bias.value,
-            ts_bias=f"Raw:{raw_signal:.2f}",
-            regime=regime.state
+            vision_bias=vision.market_bias.value if vision else "N/A",
+            ts_bias=f"{mode_label}:{raw_signal:.2f}",
+            regime=regime_state
         )
         
-        # 5. Apply Safety Gates (Final Filter)
-        final_signal = SafetyGates.validate(intermediate_signal, vision, ts, regime)
+        # 6. Apply Safety Gates (Final Filter)
+        # Note: Gates might block if Regime is missing/Unknown. We might need to relax Gates for Vision Only.
+        if regime:
+             final_signal = SafetyGates.validate(intermediate_signal, vision, ts, regime)
+        else:
+             final_signal = intermediate_signal # Skip gates if no regime data (Vision Only Risk is high!)
         
         return final_signal

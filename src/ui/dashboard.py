@@ -54,14 +54,12 @@ def load_engines():
         MLProductionEngine()
     )
 
-def render_safety_badge(connected: bool):
-    color = "#238636" if connected else "#DA3633"
-    status = "CONNECTED" if connected else "DISCONNECTED"
+def render_safety_badge(status: str, color_code: str):
     st.markdown(f"""
-    <div style="display: flex; align-items: center; gap: 10px; background: #161B22; padding: 8px 16px; border-radius: 20px; border: 1px solid {color};">
-        <div style="width: 10px; height: 10px; border-radius: 50%; background-color: {color}; box-shadow: 0 0 5px {color};"></div>
-        <span style="font-weight: bold; font-size: 0.9em; color: {color};">{status}</span>
-        <span style="color: #8B949E; border-left: 1px solid #444; padding-left: 10px; font-size: 0.8em;">ANALYSIS ONLY</span>
+    <div style="display: flex; align-items: center; gap: 10px; background: #161B22; padding: 8px 16px; border-radius: 20px; border: 1px solid {color_code};">
+        <div style="width: 10px; height: 10px; border-radius: 50%; background-color: {color_code}; box-shadow: 0 0 5px {color_code};"></div>
+        <span style="font-weight: bold; font-size: 0.9em; color: {color_code};">{status}</span>
+        <span style="color: #8B949E; border-left: 1px solid #444; padding-left: 10px; font-size: 0.8em;">SYSTEM ACTIVE</span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -141,7 +139,19 @@ def main():
         st.markdown(f"**Target:** {target} | **Profile:** {strategy_mode} | **TF:** Adaptive")
         
     with c_status:
-        render_safety_badge(st.session_state['capturing'])
+        # Determine Status
+        status_text = "READY"
+        status_color = "#8B949E" # Gray
+        
+        if st.session_state['capturing']:
+            if input_mode == "Live Screen":
+                status_text = "VISION ONLY"
+                status_color = "#D29922" # Amber
+            else:
+                status_text = "DATA FEED"
+                status_color = "#238636" # Green
+                
+        render_safety_badge(status_text, status_color)
 
     st.markdown("---")
 
@@ -191,20 +201,21 @@ def main():
                 if df is not None:
                     ts_out = ts_engine.predict(df)
                     regime_out = regime_engine.analyze(df)
-                else:
-                    # Mock for Vision
-                    from src.core.types import TSOutput, RegimeOutput
-                    ts_out = TSOutput(0.0, 0.0, 0.0)
-                    regime_out = RegimeOutput(True, "Vision_Mode", "N/A")
+                
                 # 3. Strategy Routing
                 signal = None
                 
-                if strategy_mode == "Auto (Fusion)":
-                    # Run All Institutional Engines
+                # Pre-calculate data signals if data exists
+                ml_sig = None
+                deep_sig = None
+                math_sig = None
+                
+                if df is not None:
                     ml_sig = ml_engine.analyze(df)
                     deep_sig = deep_engine.analyze(df)
                     math_sig = math_engine.analyze(df)
-                    
+                
+                if strategy_mode == "Auto (Fusion)":
                     signal = fusion_engine.fuse(
                         vision_out, 
                         ts_out, 
@@ -239,21 +250,30 @@ def main():
                     signal = ml_engine.analyze(df)
 
                 elif strategy_mode == "Binomo Focus":
-                    # Special return type for Binomo, but we map to standard for Fusion compatibility
-                    # or better: we handle UI differently for Binomo.
-                    # Let's get the specific object first
-                    b_sig = binomo_engine.analyze(df, vision_out=vision_out)
+                    # 1. Calculate Institutional "Fusion" Signal (Silent)
+                    # Uses pre-calcs above (ml_sig etc)
                     
-                    # Store for custom UI rendering below?
-                    # Or map to signal object:
-                    # Or map to signal object:
+                    fusion_sig = fusion_engine.fuse(
+                        vision_out, 
+                        ts_out, 
+                        regime_out,
+                        ml_sig=ml_sig, 
+                        deep_sig=deep_sig, 
+                        math_sig=math_sig
+                    )
+                    
+                    # 2. Pass to Binomo Execution Engine
+                    # Now it aggregates Fusion + Vision + Heuristics
+                    b_sig = binomo_engine.analyze(df, vision_out=vision_out, fusion_sig=fusion_sig)
+                    
+                    # 3. Map to standard FinalSignal for UI compatibility
                     act = TradeAction.STAY_OUT
                     if b_sig.action == "BUY": act = TradeAction.BUY
                     elif b_sig.action == "SELL": act = TradeAction.SELL
                     
                     signal = FinalSignal(act, b_sig.confidence, b_sig.reasoning, "N/A", "N/A", "Binomo")
                     # We inject expiry into reasoning for display
-                    signal.reasoning.append(f"Expiry: {b_sig.expiry}")
+                    signal.reasoning.append(f"⏱️ Expiry: {b_sig.expiry}")
                 
                 # Fallback
                 if signal is None:
