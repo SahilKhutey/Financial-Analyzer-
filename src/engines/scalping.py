@@ -13,7 +13,7 @@ class ScalpingEngine:
      specialized engine for micro-trend scalping.
     """
     
-    def analyze(self, df: pd.DataFrame, vision_out=None) -> FinalSignal:
+    def analyze(self, df: pd.DataFrame, vision_out=None, hft_out=None) -> FinalSignal:
         """
         Analyze price action for scalping setups.
         Supports DataFrame or Vision input.
@@ -112,6 +112,17 @@ class ScalpingEngine:
             reasons.append("Volatility Spike Detected (Candle > 3x Avg)")
             confidence = 0.0
             
+        # 5. HFT Order Flow Armor
+        if hft_out:
+            if signal == TradeAction.BUY and hft_out.imbalance < -0.6: # Heavy Sell Pressure
+                signal = TradeAction.STAY_OUT
+                confidence = 0.0
+                reasons.append(f"HFT VETO: Heavy Sell Pressure ({hft_out.imbalance:.2f})")
+            elif signal == TradeAction.SELL and hft_out.imbalance > 0.6: # Heavy Buy Pressure
+                signal = TradeAction.STAY_OUT
+                confidence = 0.0
+                reasons.append(f"HFT VETO: Heavy Buy Pressure ({hft_out.imbalance:.2f})")
+                
         return FinalSignal(
             action=signal,
             confidence=confidence,

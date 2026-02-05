@@ -12,6 +12,7 @@ Weights:
 
 from src.core.types import FinalSignal, VisionOutput, TSOutput, RegimeOutput, TradeAction, MarketBias
 from src.core.gates import SafetyGates
+from src.core.config import FUSION_WEIGHTS
 import numpy as np
 
 class SignalFusion:
@@ -21,12 +22,12 @@ class SignalFusion:
     """
     
     def __init__(self):
-        # Grand Ensemble Weights
-        self.w_ml = 0.35
-        self.w_deep = 0.25
-        self.w_math = 0.15
-        self.w_vision = 0.15
-        self.w_ts = 0.10
+        # Grand Ensemble Weights (Loaded from Config)
+        self.weights = FUSION_WEIGHTS.copy()
+        
+    def set_weights(self, new_weights: dict):
+        """Allow dynamic updating of weights (Optimizer)."""
+        self.weights = new_weights.copy()
         
     def _signal_to_score(self, signal: FinalSignal) -> float:
         """Convert FinalSignal to -1 to 1 float."""
@@ -41,6 +42,7 @@ class SignalFusion:
              vision: VisionOutput, 
              ts: Optional[TSOutput] = None, 
              regime: Optional[RegimeOutput] = None,
+             sentiment: Optional['SentimentOutput'] = None,
              ml_sig: FinalSignal = None,
              deep_sig: FinalSignal = None,
              math_sig: FinalSignal = None) -> FinalSignal:
@@ -61,6 +63,9 @@ class SignalFusion:
         if ts:
             ts_score = (ts.bullish_prob - ts.bearish_prob)
             
+        # Sentiment Score
+        sent_score = sentiment.score if sentiment else 0.0
+            
         # New Engine Scores
         ml_score = self._signal_to_score(ml_sig) if ml_sig else 0.0
         deep_score = self._signal_to_score(deep_sig) if deep_sig else 0.0
@@ -70,11 +75,12 @@ class SignalFusion:
         # If we lack data-driven signals (TS, ML, Deep, Math), we are in "Vision Only" mode.
         
         current_weights = {
-            'ml': self.w_ml if ml_sig else 0.0,
-            'deep': self.w_deep if deep_sig else 0.0,
-            'math': self.w_math if math_sig else 0.0,
-            'ts': self.w_ts if ts else 0.0,
-            'vision': self.w_vision
+            'ml': self.weights['ml'] if ml_sig else 0.0,
+            'deep': self.weights['deep'] if deep_sig else 0.0,
+            'math': self.weights['math'] if math_sig else 0.0,
+            'ts': self.weights['ts'] if ts else 0.0,
+            'vision': self.weights['vision'],
+            'sentiment': self.weights.get('sentiment', 0.1) if sentiment else 0.0
         }
         
         total_weight = sum(current_weights.values())
@@ -91,7 +97,8 @@ class SignalFusion:
             (deep_score * norm_w['deep']) +
             (math_score * norm_w['math']) +
             (v_score * norm_w['vision']) +
-            (ts_score * norm_w['ts'])
+            (ts_score * norm_w['ts']) +
+            (sent_score * norm_w['sentiment'])
         )
         
         # 4. Decision Logic & Confluence Check
@@ -102,6 +109,12 @@ class SignalFusion:
         BUY_THRESH = 0.25
         SELL_THRESH = -0.25
         
+        # Veto Logic: If Sentiment is EXTREME NEGATIVE, kill BUYs
+        if sent_score < -0.6 and raw_signal > 0:
+             raw_signal = 0.0
+             confidence = 0.1
+             norm_w['sentiment'] = 1.0 # Attribution
+             
         # Veto Logic: If ML (Strongest) is strongly opposing the weighted sum, reduce confidence
         if ml_sig and ml_sig.confidence > 0.6:
             if (ml_score > 0 and raw_signal < 0) or (ml_score < 0 and raw_signal > 0):
@@ -123,10 +136,21 @@ class SignalFusion:
             reasons.append("⚠️ Vision Only Mode")
             
         reasons.append(f"Score: {raw_signal:.2f}")
+        if sent_score != 0: reasons.append(f"News: {sent_score:.2f}")
         if ml_sig: reasons.append(f"ML: {ml_score:.2f}")
         if norm_w['vision'] > 0.5: reasons.append(f"Visual: {v_score:.2f}")
         
         regime_state = regime.state if regime else "Unknown"
+        
+        # 6. Collect Model Votes
+        votes = {
+             "Vision": vision.market_bias.value if vision else "N/A",
+             "ML": ml_sig.action.value if ml_sig else "N/A",
+             "Deep": deep_sig.action.value if deep_sig else "N/A",
+             "Math": math_sig.action.value if math_sig else "N/A",
+             "News": sentiment.bias if sentiment else "N/A",
+             "Fusion": action.value
+        }
         
         intermediate_signal = FinalSignal(
             action=action,
@@ -134,13 +158,20 @@ class SignalFusion:
             reasoning=reasons,
             vision_bias=vision.market_bias.value if vision else "N/A",
             ts_bias=f"{mode_label}:{raw_signal:.2f}",
-            regime=regime_state
+            regime=regime_state,
+            model_votes=votes
         )
         
-        # 6. Apply Safety Gates (Final Filter)
+        # 7. Apply Safety Gates (Final Filter)
         # Note: Gates might block if Regime is missing/Unknown. We might need to relax Gates for Vision Only.
         if regime:
              final_signal = SafetyGates.validate(intermediate_signal, vision, ts, regime)
+             # Preserve votes even if rewritten by SafeTy Gates???
+             # SafetyGates currently creates a NEW signal. We might lose votes.
+             # Ideally validation modifies in place or we re-attach votes.
+             # For now, let's attach votes to the result of validation if it's missing.
+             if final_signal.model_votes is None:
+                 final_signal.model_votes = votes
         else:
              final_signal = intermediate_signal # Skip gates if no regime data (Vision Only Risk is high!)
         

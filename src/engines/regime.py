@@ -22,7 +22,7 @@ class RegimeFilter:
         self.gmm = GaussianMixture(n_components=3, covariance_type="full", random_state=42)
         self.is_fitted = False
     
-    def analyze(self, df: pd.DataFrame) -> RegimeOutput:
+    def analyze(self, df: pd.DataFrame, macro_state=None) -> RegimeOutput:
         """
         Check if market is safe.
         """
@@ -31,7 +31,11 @@ class RegimeFilter:
             
         last = df.iloc[-1]
         
-        # 1. Hard Gate: Extreme Volatility Check (ATR)
+        # 1. Macro Safety Check (Global Veto)
+        if macro_state and macro_state.regime == "RECESSION":
+             return RegimeOutput(False, "MACRO: RECESSION", "Global Risk Veto")
+        
+        # 2. Hard Gate: Extreme Volatility Check (ATR)
         if 'atr' not in df.columns:
             tr = pd.concat([
                 df['High'] - df['Low'], 
@@ -46,12 +50,12 @@ class RegimeFilter:
         if rel_atr > MAX_DAILY_DRAWDOWN_LIMIT:
              return RegimeOutput(False, "High Volatility", f"ATR {rel_atr:.1%} > Limit")
              
-        # 2. Hard Gate: Liquidity Check (Volume)
+        # 3. Hard Gate: Liquidity Check (Volume)
         avg_vol = df['Volume'].rolling(20).mean().iloc[-1]
         if last['Volume'] < (avg_vol * 0.1): # 10% threshold (institutional)
              return RegimeOutput(False, "Dead Market", "Volume < 10% Avg")
              
-        # 3. GMM Regime Classification
+        # 4. GMM Regime Classification
         # We classify based on Returns distribution
         returns = df['Close'].pct_change().dropna().values.reshape(-1, 1)
         state_label = "NORMAL"
@@ -75,5 +79,9 @@ class RegimeFilter:
                     state_label = "TRENDING" # Medium Vol
         except Exception:
             state_label = "UNCERTAIN" # Fallback
+            
+        # Append Macro tag if Risk-Off
+        if macro_state and macro_state.regime == "RISK_OFF":
+            state_label += " ( RISK-OFF )"
             
         return RegimeOutput(True, state_label, "Vol & Liq Safe")

@@ -11,6 +11,9 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Optional, List, Dict
 from src.core.types import FinalSignal, TradeAction, VisionOutput
+from src.core.journal import Journal
+from src.core.notifier import Notifier
+from src.core.money_manager import MoneyManager
 
 @dataclass
 class BinomoSignal:
@@ -25,6 +28,9 @@ class BinomoEngine:
         self.min_volatility = 0.0004
         self.rsi_upper = 70
         self.rsi_lower = 30
+        self.journal = Journal()
+        self.notifier = Notifier()
+        self.money_manager = MoneyManager()
         
     def _calculate_rsi(self, series, period=14):
         delta = series.diff()
@@ -148,3 +154,34 @@ class BinomoEngine:
             reasoning=reasons,
             is_safe=True
         )
+
+    def execute_trade(self, signal: FinalSignal, amount: float = 10.0) -> str:
+        """
+        Mock Execution Bridge.
+        In production, this would call the Binomo Private API / Selenium Driver.
+        """
+        if signal.action == TradeAction.STAY_OUT:
+            return "No Trade"
+            
+        # 1. Money Management
+        final_amount = self.money_manager.get_trade_amount(signal.confidence)
+        
+        if final_amount <= 0:
+            return "Risk Gate: Trading Stopped (Daily Loss Limit)"
+            
+        # Log Logic
+        print(f"⚡ EXECUTING BINOMO TRADE: {signal.action.value} | Amt: ${final_amount}")
+        
+        # Journal Logs
+        self.journal.log_trade(
+            asset="BTC/Crypto", # Default/Generic for now
+            action=signal.action.value,
+            amount=final_amount,
+            strategy="Auto-Vision",
+            reason=str(signal.reasoning)
+        )
+        
+        # Alert
+        self.notifier.send(f"Executed {signal.action.value} on BTC for ${final_amount}", level=signal.action.value)
+        
+        return f"Placed {signal.action.value} for ${final_amount} (Simulated)"

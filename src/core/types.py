@@ -48,3 +48,4 @@ class FinalSignal:
     vision_bias: str
     ts_bias: str
     regime: str
+    model_votes: Optional[dict] = None

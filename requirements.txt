@@ -10,3 +10,4 @@ mss
 opencv-python
 scipy
 pykalman
+ultralytics
