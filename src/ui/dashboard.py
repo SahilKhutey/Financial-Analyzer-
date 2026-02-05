@@ -46,6 +46,7 @@ from src.engines.trainer import ModelTrainer
 from src.engines.sentiment import SentimentEngine
 from src.engines.macro import MacroEngine
 from src.engines.hft import HFTEngine
+from src.interfaces.telegram_bot import TelegramBot
 
 @st.cache_resource
 def load_engines():
@@ -69,7 +70,8 @@ def load_engines():
         ModelTrainer(),
         SentimentEngine(),
         MacroEngine(),
-        HFTEngine()
+        HFTEngine(),
+        TelegramBot()
     )
 
 def render_safety_badge(status: str, color_code: str):
@@ -84,7 +86,7 @@ def render_safety_badge(status: str, color_code: str):
 # --- 4. MAIN APP LAYOUT ---
 def main():
     # Load Core
-    vision_engine, ts_engine, regime_engine, fusion_engine, bt_engine, scalp_engine, breakout_engine, mr_engine, trend_engine, binomo_engine, smart_engine, math_engine, deep_engine, ml_engine, yolo_engine, expl_engine, opt_engine, trainer_engine, sent_engine, macro_engine, hft_engine = load_engines()
+    vision_engine, ts_engine, regime_engine, fusion_engine, bt_engine, scalp_engine, breakout_engine, mr_engine, trend_engine, binomo_engine, smart_engine, math_engine, deep_engine, ml_engine, yolo_engine, expl_engine, opt_engine, trainer_engine, sent_engine, macro_engine, hft_engine, bot_engine = load_engines()
     
     # Session State Init
     if 'history' not in st.session_state: st.session_state['history'] = []
@@ -679,9 +681,24 @@ def main():
                 
                 # Auto-Rerun Mock (For demo loop feel)
                 # Use selected interval
+                
+                # --- BOT CONTROL ---
+                # Check for remote commands
+                cmd = bot_engine.poll()
+                if cmd:
+                    logger.info(f"Bot Command Received: {cmd.command}")
+                    if cmd.command == "/stop":
+                         st.session_state['capturing'] = False
+                         bot_engine.send_message("🚨 System Stopped by Admin.")
+                         st.rerun()
+                    elif cmd.command == "/status":
+                         status_msg = f"✅ System ACTIVE. | PnL: {journal.get_metrics()['pnl']:.2f} | Regime: {regime_out.state if regime_out else 'N/A'}"
+                         bot_engine.send_message(status_msg)
+                         st.toast("Status sent to Bot")
+
                 time.sleep(st.session_state.get('interval', 5)) 
                 st.rerun()
-
+ 
                 with st.expander("⚡ System Health (Latency)"):
                     cols = st.columns(len(stats.timings)) if stats.timings else [st.empty()]
                     for i, (k, v) in enumerate(stats.timings.items()):
